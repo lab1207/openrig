@@ -153,6 +153,59 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.skipped).toBe(0);
   });
 
+  it("re-parses same-second content edits via source_hash (issue #415)", () => {
+    writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    // Edit the objective but keep mtime inside the cached second bucket.
+    writeFileSync(join(folder, "wf.yaml"), VALID_YAML.replace("A folder-scan fixture", "Edited objective"));
+    const cached = db
+      .prepare(`SELECT cached_at FROM workflow_specs WHERE name = ?`)
+      .get("folder-test") as { cached_at: string };
+    const bucketEnd = new Date(Math.floor(Date.parse(cached.cached_at) / 1000) * 1000 + 999);
+    utimesSync(join(folder, "wf.yaml"), bucketEnd, bucketEnd);
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(result.scanned).toBe(1);
+    expect(result.valid).toBe(1);
+    expect(result.skipped).toBe(0);
+    const row = cache.listAll().find((r) => r.name === "folder-test");
+    expect(row?.purpose).toBe("Edited objective");
+  });
+
+  it("still skips unchanged files within the same second bucket", () => {
+    writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    const before = db
+      .prepare(`SELECT cached_at FROM workflow_specs WHERE name = ?`)
+      .get("folder-test") as { cached_at: string };
+    // Same content, mtime pinned inside the cached second bucket.
+    const bucketEnd = new Date(Math.floor(Date.parse(before.cached_at) / 1000) * 1000 + 999);
+    utimesSync(join(folder, "wf.yaml"), bucketEnd, bucketEnd);
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(result.scanned).toBe(1);
+    expect(result.valid).toBe(0);
+    expect(result.skipped).toBe(1);
+    const after = db
+      .prepare(`SELECT cached_at FROM workflow_specs WHERE name = ?`)
+      .get("folder-test") as { cached_at: string };
+    expect(after.cached_at).toBe(before.cached_at);
+  });
+
+  it("re-parses same-second newly-malformed YAML into a diagnostic (issue #415)", () => {
+    writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
+    scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    const cached = db
+      .prepare(`SELECT cached_at FROM workflow_specs WHERE name = ?`)
+      .get("folder-test") as { cached_at: string };
+    writeFileSync(join(folder, "wf.yaml"), INVALID_YAML);
+    const bucketEnd = new Date(Math.floor(Date.parse(cached.cached_at) / 1000) * 1000 + 999);
+    utimesSync(join(folder, "wf.yaml"), bucketEnd, bucketEnd);
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(result.scanned).toBe(1);
+    expect(result.valid).toBe(0);
+    expect(result.errors).toBe(1);
+    expect(result.skipped).toBe(0);
+  });
+
   it("removes cache row when file disappears (OQ-4)", () => {
     writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
     writeFileSync(join(folder, "wf2.yaml"), VALID_YAML_TWO);

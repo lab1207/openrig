@@ -446,16 +446,30 @@ export function scanWorkflowSpecFolder(
     // precision; without this floor a freshly-written file whose mtime
     // is `T - 999ms` would always look "newer" than its cached_at at
     // exactly `T` and never skip.
+    //
+    // Same-second buckets cannot prove a change either way, so a bucket
+    // hit falls back to the stored SHA-256 source_hash: unchanged content
+    // keeps skipping, edited content falls through to re-parse. Unreadable
+    // content never skips — the parse below re-evaluates it.
     const cachedAt = opts.db
-      .prepare(`SELECT cached_at FROM workflow_specs WHERE source_path = ?`)
-      .get(filePath) as { cached_at: string } | undefined;
+      .prepare(`SELECT cached_at, source_hash FROM workflow_specs WHERE source_path = ?`)
+      .get(filePath) as { cached_at: string; source_hash: string } | undefined;
     if (cachedAt) {
       const cachedAtMs = Date.parse(cachedAt.cached_at);
       const cachedAtSec = Math.floor(cachedAtMs / 1000);
       const mtimeSec = Math.floor(mtimeMs / 1000);
       if (Number.isFinite(cachedAtMs) && cachedAtSec >= mtimeSec) {
-        result.skipped += 1;
-        continue;
+        try {
+          const currentHash = createHash("sha256")
+            .update(readFileSync(filePath, "utf-8"))
+            .digest("hex");
+          if (currentHash === cachedAt.source_hash) {
+            result.skipped += 1;
+            continue;
+          }
+        } catch {
+          // fall through to re-parse below
+        }
       }
     }
 

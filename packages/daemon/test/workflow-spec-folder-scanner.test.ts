@@ -153,6 +153,43 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     expect(result.skipped).toBe(0);
   });
 
+  it("recovers a repaired diagnostic row in place (issue #418)", () => {
+    const file = join(folder, "wf.yaml");
+    writeFileSync(file, INVALID_YAML);
+    expect(scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null }).errors).toBe(1);
+    writeFileSync(file, VALID_YAML);
+    // Force the re-parse path (same-second repairs are issue #415's domain).
+    const future = new Date(Date.now() + 60_000);
+    utimesSync(file, future, future);
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(result).toEqual({ scanned: 1, valid: 1, errors: 0, removed: 0, skipped: 0 });
+    const rows = db
+      .prepare(`SELECT name, status FROM workflow_specs WHERE source_path = ?`)
+      .all(file) as Array<{ name: string; status: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ name: "folder-test", status: "valid" });
+  });
+
+  it("recovers a formerly-valid workflow that broke and was repaired (issue #418)", () => {
+    const file = join(folder, "wf.yaml");
+    const future = new Date(Date.now() + 60_000);
+    writeFileSync(file, VALID_YAML);
+    expect(scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null }).valid).toBe(1);
+    writeFileSync(file, INVALID_YAML);
+    utimesSync(file, future, future);
+    expect(scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null }).errors).toBe(1);
+    writeFileSync(file, VALID_YAML);
+    // Force the re-parse path (same-second repairs are issue #415's domain).
+    utimesSync(file, new Date(Date.now() + 120_000), new Date(Date.now() + 120_000));
+    const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
+    expect(result).toEqual({ scanned: 1, valid: 1, errors: 0, removed: 0, skipped: 0 });
+    const rows = db
+      .prepare(`SELECT name, status FROM workflow_specs WHERE source_path = ?`)
+      .all(file) as Array<{ name: string; status: string }>;
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ name: "folder-test", status: "valid" });
+  });
+
   it("removes cache row when file disappears (OQ-4)", () => {
     writeFileSync(join(folder, "wf.yaml"), VALID_YAML);
     writeFileSync(join(folder, "wf2.yaml"), VALID_YAML_TWO);

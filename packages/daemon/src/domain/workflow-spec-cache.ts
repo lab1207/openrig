@@ -621,6 +621,10 @@ export class WorkflowSpecCache {
            WHERE spec_id = ?`,
         )
         .run(...(updateParams as never[]));
+      // A repaired file's stale diagnostic row (basename + empty version)
+      // never matches the name+version lookup above — remove it so one
+      // source path resolves to one valid row again (issue #418).
+      this.removeStaleSamePathRows(sourcePath, existing.spec_id);
       return rowToWorkflowSpec({
         ...existing,
         purpose,
@@ -659,6 +663,11 @@ export class WorkflowSpecCache {
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?${insertPlaceholder})`,
       )
       .run(...(insertParams as never[]));
+    // Repair path (issue #418): a stale diagnostic row for this file carries
+    // the basename + empty version, so it never matched the lookup above and
+    // a second row was just inserted. Remove it so the repaired file resolves
+    // to one valid row again.
+    this.removeStaleSamePathRows(sourcePath, specId);
     return rowToWorkflowSpec({
       spec_id: specId,
       name: spec.id,
@@ -854,6 +863,19 @@ export class WorkflowSpecCache {
       .prepare(`DELETE FROM workflow_specs WHERE source_path = ?`)
       .run(sourcePath);
     return result.changes;
+  }
+
+  /**
+   * Issue #418 — drop every row for a source path except the freshly
+   * upserted one. A repaired file's stale diagnostic row (basename +
+   * empty version) never matches readThrough's name+version lookup, so
+   * without this the repair inserts a second row and the error stays
+   * visible. Uses only core columns, so it is safe on pre-040 schemas.
+   */
+  private removeStaleSamePathRows(sourcePath: string, keepSpecId: string): void {
+    this.db
+      .prepare(`DELETE FROM workflow_specs WHERE source_path = ? AND spec_id != ?`)
+      .run(sourcePath, keepSpecId);
   }
 
   /**

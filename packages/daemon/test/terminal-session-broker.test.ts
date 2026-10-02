@@ -113,8 +113,12 @@ describe("TerminalSessionBroker", () => {
     expect(rocket).toHaveLength(4);
     // First poll consumes the ASCII prefix plus the first half of the emoji.
     fs.appendFileSync(path, Buffer.concat([Buffer.from("UTF8_START:", "utf-8"), rocket.subarray(0, 2)]));
-    // Let at least one poll run before the remaining bytes arrive.
-    await new Promise((r) => setTimeout(r, 100));
+    // Wait for the first poll to process the prefix before the remaining
+    // bytes arrive — this proves the split straddles two polls instead of
+    // relying on timer luck.
+    await vi.waitFor(() => {
+      expect(sub.received.join("")).toContain("UTF8_START:");
+    }, { timeout: 1000 });
     fs.appendFileSync(
       path,
       Buffer.concat([rocket.subarray(2), Buffer.from(" café 中文 :UTF8_END", "utf-8")]),

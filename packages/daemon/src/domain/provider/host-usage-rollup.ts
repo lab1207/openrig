@@ -175,13 +175,20 @@ function rollupClaude(input: HostUsageRollupInput): HostUsageRow | null {
   const maxUsed = Math.max(...meterRows.map((s) => s.usedPercent!));
   if (maxUsed >= 100) {
     const exhausted = meterRows.filter((s) => s.usedPercent! >= 100);
-    const resets = exhausted
-      .map((s) => s.resetsAt)
-      .filter((x): x is string => typeof x === "string")
-      .sort();
     // The host lifts only when EVERY exhausted window has reset: report the
-    // latest reset, not the earliest (issue #416).
-    const lastReset = resets.length > 0 ? resets[resets.length - 1] : undefined;
+    // latest reset (issue #416). Compare parsed instants — the reader
+    // preserves offset-bearing strings, which do not sort lexicographically
+    // in chronological order — but keep the original string. If any blocking
+    // window lacks a usable reset, the lift time is unknown: omit it rather
+    // than overclaim an earlier one.
+    const instants = exhausted.map((s) =>
+      typeof s.resetsAt === "string" ? Date.parse(s.resetsAt) : NaN,
+    );
+    if (instants.some((ms) => !Number.isFinite(ms))) {
+      return { ...base, state: "limited" };
+    }
+    const latest = instants.indexOf(Math.max(...instants));
+    const lastReset = latest >= 0 ? exhausted[latest]!.resetsAt : undefined;
     return { ...base, state: "limited", ...(lastReset !== undefined ? { resetsAt: lastReset } : {}) };
   }
   if (maxUsed >= NEARING_THRESHOLD_PERCENT) return { ...base, state: "nearing" };
@@ -224,10 +231,7 @@ function rollupCodex(input: HostUsageRollupInput): HostUsageRow | null {
       .map((s) => s.resetsAt)
       .filter((x): x is string => typeof x === "string")
       .sort();
-    // Same rule as the Claude lane: the host lifts when every exhausted
-    // window has reset, so report the latest reset (issue #416).
-    const lastReset = resets.length > 0 ? resets[resets.length - 1] : undefined;
-    return { ...base, state: "limited", ...(lastReset !== undefined ? { resetsAt: lastReset } : {}) };
+    return { ...base, state: "limited", ...(resets[0] !== undefined ? { resetsAt: resets[0] } : {}) };
   }
 
   return {

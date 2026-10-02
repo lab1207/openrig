@@ -109,17 +109,35 @@ describe("S-A host-level usage rollup (pure)", () => {
     expect(lr.resetsAt).toBe(late);
   });
 
-  it("codex LIMITED reports the LATEST reset across at-limit events (issue #416)", () => {
-    const early = "2026-08-05T01:00:00.000Z";
-    const late = "2026-08-05T04:00:00.000Z";
+  it("claude LIMITED compares offset-bearing resets as instants, not strings", () => {
+    // 00:30Z sorts after 01:00Z lexicographically but is the earlier instant.
+    const earlierInstant = "2026-08-05T02:30:00+02:00";
+    const laterInstant = "2026-08-05T01:00:00Z";
     const rows = rollupHostUsage({
-      signals: [codexEventRow({ resetsAt: early }), codexEventRow({ resetsAt: late })],
-      codexProfilesPresent: true,
+      signals: [
+        claudeRow("a@r", 100, { window: "five_hour" as const, resetsAt: earlierInstant }),
+        claudeRow("a@r", 100, { window: "seven_day" as const, resetsAt: laterInstant }),
+      ],
+      codexProfilesPresent: false,
       now: NOW,
     });
-    const r = rowFor(rows, "codex");
-    expect(r.state).toBe("limited");
-    expect(r.resetsAt).toBe(late);
+    const lr = rowFor(rows, "claude");
+    expect(lr.state).toBe("limited");
+    expect(lr.resetsAt).toBe(laterInstant);
+  });
+
+  it("claude LIMITED omits resetsAt when any exhausted window lacks one", () => {
+    const rows = rollupHostUsage({
+      signals: [
+        claudeRow("a@r", 100, { window: "five_hour" as const, resetsAt: "2026-08-05T03:00:00.000Z" }),
+        { ...claudeRow("a@r", 100, { window: "seven_day" as const }), resetsAt: undefined },
+      ],
+      codexProfilesPresent: false,
+      now: NOW,
+    });
+    const lr = rowFor(rows, "claude");
+    expect(lr.state).toBe("limited");
+    expect(lr.resetsAt).toBeUndefined();
   });
 
   it("(ii) CONFLICTING seat windows = first-class anomaly + explicit_unknown — NEVER a silent merge", () => {

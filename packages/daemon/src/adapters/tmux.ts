@@ -496,8 +496,13 @@ export class TmuxAdapter {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
       // tab delimiters are malformed across tmux versions.
-      await this.run(["tmux", "has-session", "-t", name],
-        `tmux has-session -t ${shellQuote(name)}`);
+      //
+      // Issue #423: prefix `=` forces an EXACT session-name match. Without it
+      // tmux resolves `-t worker@demo` against an existing `worker@demo2` and
+      // the probe reports a missing session present.
+      const exact = name.startsWith("=") ? name : `=${name}`;
+      await this.run(["tmux", "has-session", "-t", exact],
+        `tmux has-session -t ${shellQuote(exact)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       if (isSessionAbsenceError(err)) {

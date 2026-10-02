@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { TmuxResult, TmuxCursorPosition } from "../adapters/tmux.js";
 
 // OPR.0.4.0.38 - real-terminal session broker.
@@ -172,7 +173,11 @@ export class TerminalSessionBroker {
   private historyBytes = 0;
   private outputPath: string | null = null;
   private pipeActive = false;
-  private tailInterval: ReturnType<typeof setInterval> | null = null;
+  // Issue #419: each tail poll reads an arbitrary byte window, so a
+  // multi-byte character can straddle two polls. Decode through one
+  // StringDecoder so incomplete trailing bytes are retained and completed
+  // by the next poll instead of decoding to U+FFFD on each side.
+  private readonly utf8Decoder = new StringDecoder("utf8");  private tailInterval: ReturnType<typeof setInterval> | null = null;
   private livenessInterval: ReturnType<typeof setInterval> | null = null;
   private lastSize = 0;
   private inputQueue: Promise<void> = Promise.resolve();
@@ -456,7 +461,11 @@ export class TerminalSessionBroker {
           fs.readSync(fd, buf, 0, buf.length, this.lastSize);
           fs.closeSync(fd);
           this.lastSize += buf.length;
-          this.fanout(buf.toString("utf-8"));
+          // Decode through the retained decoder: a poll that ends mid-character
+          // emits nothing for the partial bytes and completes them next poll.
+          // Skip empty emissions so subscribers never see zero-length sends.
+          const text = this.utf8Decoder.write(buf);
+          if (text) this.fanout(text);
         }
       } catch {
         // transient stat/read failures are tolerated; liveness owns death

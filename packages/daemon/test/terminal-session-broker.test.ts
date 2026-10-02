@@ -103,6 +103,29 @@ describe("TerminalSessionBroker", () => {
     }, { timeout: 1000 });
   });
 
+  it("test 1b: split multi-byte characters survive poll boundaries (issue #419)", async () => {
+    const broker = track(new TerminalSessionBroker("dev@rig", makeTmux(), { pollMs: 10 }));
+    const sub = makeSub();
+    await broker.attach(sub);
+
+    const path = broker.pipeOutputPath!;
+    const rocket = Buffer.from("🚀", "utf-8");
+    expect(rocket).toHaveLength(4);
+    // First poll consumes the ASCII prefix plus the first half of the emoji.
+    fs.appendFileSync(path, Buffer.concat([Buffer.from("UTF8_START:", "utf-8"), rocket.subarray(0, 2)]));
+    // Let at least one poll run before the remaining bytes arrive.
+    await new Promise((r) => setTimeout(r, 100));
+    fs.appendFileSync(
+      path,
+      Buffer.concat([rocket.subarray(2), Buffer.from(" café 中文 :UTF8_END", "utf-8")]),
+    );
+
+    await vi.waitFor(() => {
+      expect(sub.received.join("")).toContain("UTF8_START:🚀 café 中文 :UTF8_END");
+    }, { timeout: 1000 });
+    expect(sub.received.join("")).not.toContain("�");
+  });
+
   it("test 2: a 2nd subscriber does NOT start a second pipe-pane", async () => {
     const startPipePane = vi.fn(async () => ({ ok: true as const }));
     const broker = track(new TerminalSessionBroker("dev@rig", makeTmux({ startPipePane }), { pollMs: 10 }));

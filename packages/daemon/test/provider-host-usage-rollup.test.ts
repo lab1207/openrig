@@ -93,6 +93,35 @@ describe("S-A host-level usage rollup (pure)", () => {
     expect(lr.resetsAt).toBe(RESETS);
   });
 
+  it("claude LIMITED reports the LATEST reset across exhausted windows (issue #416)", () => {
+    const early = "2026-08-05T03:00:00.000Z";
+    const late = "2026-08-06T12:00:00.000Z";
+    const rows = rollupHostUsage({
+      signals: [
+        claudeRow("a@r", 100, { window: "five_hour" as const, resetsAt: early }),
+        claudeRow("a@r", 100, { window: "seven_day" as const, resetsAt: late }),
+      ],
+      codexProfilesPresent: false,
+      now: NOW,
+    });
+    const lr = rowFor(rows, "claude");
+    expect(lr.state).toBe("limited");
+    expect(lr.resetsAt).toBe(late);
+  });
+
+  it("codex LIMITED reports the LATEST reset across at-limit events (issue #416)", () => {
+    const early = "2026-08-05T01:00:00.000Z";
+    const late = "2026-08-05T04:00:00.000Z";
+    const rows = rollupHostUsage({
+      signals: [codexEventRow({ resetsAt: early }), codexEventRow({ resetsAt: late })],
+      codexProfilesPresent: true,
+      now: NOW,
+    });
+    const r = rowFor(rows, "codex");
+    expect(r.state).toBe("limited");
+    expect(r.resetsAt).toBe(late);
+  });
+
   it("(ii) CONFLICTING seat windows = first-class anomaly + explicit_unknown — NEVER a silent merge", () => {
     const otherReset = "2026-08-05T06:30:00.000Z"; // a different account's schedule
     const rows = rollupHostUsage({

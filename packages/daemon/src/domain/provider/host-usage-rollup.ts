@@ -179,7 +179,10 @@ function rollupClaude(input: HostUsageRollupInput): HostUsageRow | null {
       .map((s) => s.resetsAt)
       .filter((x): x is string => typeof x === "string")
       .sort();
-    return { ...base, state: "limited", ...(resets[0] !== undefined ? { resetsAt: resets[0] } : {}) };
+    // The host lifts only when EVERY exhausted window has reset: report the
+    // latest reset, not the earliest (issue #416).
+    const lastReset = resets.length > 0 ? resets[resets.length - 1] : undefined;
+    return { ...base, state: "limited", ...(lastReset !== undefined ? { resetsAt: lastReset } : {}) };
   }
   if (maxUsed >= NEARING_THRESHOLD_PERCENT) return { ...base, state: "nearing" };
   return { ...base, state: "ok" };
@@ -221,7 +224,10 @@ function rollupCodex(input: HostUsageRollupInput): HostUsageRow | null {
       .map((s) => s.resetsAt)
       .filter((x): x is string => typeof x === "string")
       .sort();
-    return { ...base, state: "limited", ...(resets[0] !== undefined ? { resetsAt: resets[0] } : {}) };
+    // Same rule as the Claude lane: the host lifts when every exhausted
+    // window has reset, so report the latest reset (issue #416).
+    const lastReset = resets.length > 0 ? resets[resets.length - 1] : undefined;
+    return { ...base, state: "limited", ...(lastReset !== undefined ? { resetsAt: lastReset } : {}) };
   }
 
   return {

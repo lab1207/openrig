@@ -157,17 +157,26 @@ describe("scanWorkflowSpecFolder (slice 11)", () => {
     const file = join(folder, "wf.yaml");
     writeFileSync(file, INVALID_YAML);
     expect(scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null }).errors).toBe(1);
+    // Seed an unrelated workflow: the repair cleanup must not touch other paths.
+    const other = join(folder, "other.yaml");
+    writeFileSync(other, VALID_YAML_TWO);
     writeFileSync(file, VALID_YAML);
     // Force the re-parse path (same-second repairs are issue #415's domain).
     const future = new Date(Date.now() + 60_000);
     utimesSync(file, future, future);
+    utimesSync(other, future, future);
     const result = scanWorkflowSpecFolder({ db, cache, folder, builtinDir: null });
-    expect(result).toEqual({ scanned: 1, valid: 1, errors: 0, removed: 0, skipped: 0 });
+    expect(result).toEqual({ scanned: 2, valid: 2, errors: 0, removed: 0, skipped: 0 });
     const rows = db
       .prepare(`SELECT name, status FROM workflow_specs WHERE source_path = ?`)
       .all(file) as Array<{ name: string; status: string }>;
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ name: "folder-test", status: "valid" });
+    const survivors = db
+      .prepare(`SELECT name, status FROM workflow_specs WHERE source_path = ?`)
+      .all(other) as Array<{ name: string; status: string }>;
+    expect(survivors).toHaveLength(1);
+    expect(survivors[0]).toMatchObject({ name: "folder-test-2", status: "valid" });
   });
 
   it("recovers a formerly-valid workflow that broke and was repaired (issue #418)", () => {

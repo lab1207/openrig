@@ -147,6 +147,9 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
       intervalSeconds: 30,
       registeredBySession: "ops@kernel",
     });
+    // Otherwise-due job: without the stop it would fire, so this fails if
+    // the exclusion breaks.
+    jobsRepo.recordEvaluation(job.jobId, new Date(Date.now() - 60_000).toISOString(), true);
     jobsRepo.stop(job.jobId);
     const engine = makeEngine();
     const sched = new WatchdogScheduler({ jobsRepo, policyEngine: engine });
@@ -162,6 +165,9 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
       intervalSeconds: 30,
       registeredBySession: "ops@kernel",
     });
+    // Otherwise-due job: without the terminal mark it would fire, so this
+    // fails if the exclusion breaks.
+    jobsRepo.recordEvaluation(job.jobId, new Date(Date.now() - 60_000).toISOString(), true);
     jobsRepo.markTerminal(job.jobId, "done");
     const engine = makeEngine();
     const sched = new WatchdogScheduler({ jobsRepo, policyEngine: engine });

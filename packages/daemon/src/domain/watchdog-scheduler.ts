@@ -152,7 +152,17 @@ export class WatchdogScheduler {
  * is enforced one layer up by the policy engine, NOT here.
  */
 export function isDue(job: WatchdogJob, nowMs: number): boolean {
-  if (!job.lastEvaluationAt) return true;
+  if (!job.lastEvaluationAt) {
+    // #801: a periodic reminder with no evaluation yet measures its first
+    // interval from registration, so it waits a full interval instead of
+    // firing on the scheduler's first scan. Every other policy keeps the
+    // immediate first evaluation.
+    if (job.policy !== "periodic-reminder") return true;
+    const registered = Date.parse(job.registeredAt);
+    if (Number.isNaN(registered)) return true;
+    const cadenceSeconds = job.scanIntervalSeconds ?? job.intervalSeconds;
+    return nowMs - registered >= cadenceSeconds * 1000;
+  }
   const last = Date.parse(job.lastEvaluationAt);
   if (Number.isNaN(last)) return true;
   const cadenceSeconds = job.scanIntervalSeconds ?? job.intervalSeconds;

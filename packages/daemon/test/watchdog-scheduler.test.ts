@@ -67,6 +67,41 @@ describe("WatchdogScheduler (PL-004 Phase C)", () => {
     expect(isDue(job, Date.now())).toBe(true);
   });
 
+  it("stays immediately due for a pre-upgrade pending wake (null evaluation + pending event, #860)", () => {
+    const pendingSpec = JSON.stringify({
+      policy: "periodic-reminder",
+      target: { session: "a@rig" },
+      message: "x",
+      context: { queue_wait: { qitemId: "qitem-1", eventPending: true } },
+    });
+    const pending = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml: pendingSpec,
+      targetSession: "a@rig",
+      intervalSeconds: 300,
+      registeredBySession: "ops@kernel",
+    });
+    expect(pending.lastEvaluationAt).toBeNull();
+    // Same instant, same null evaluation — the pending event is the split:
+    // upgrade state fires now, a fresh arm waits its first interval.
+    expect(isDue(pending, Date.now())).toBe(true);
+
+    const freshSpec = JSON.stringify({
+      policy: "periodic-reminder",
+      target: { session: "a@rig" },
+      message: "x",
+      context: { queue_wait: { qitemId: "qitem-2", eventPending: false } },
+    });
+    const fresh = jobsRepo.register({
+      policy: "periodic-reminder",
+      specYaml: freshSpec,
+      targetSession: "a@rig",
+      intervalSeconds: 300,
+      registeredBySession: "ops@kernel",
+    });
+    expect(isDue(fresh, Date.now())).toBe(false);
+  });
+
   it("isDue returns false when interval not yet elapsed", () => {
     const job = jobsRepo.register({
       policy: "periodic-reminder",

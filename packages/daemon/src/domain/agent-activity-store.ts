@@ -332,6 +332,11 @@ export function hookEventState(rawEvent: string | null | undefined, rawSubtype: 
   // The official payload carries session_id/turn_id/cwd/model/permission_mode/tool_name/tool_input;
   // the relay forwards tool_name as the subtype, so `evidence` names the tool being approved.
   if (rawEvent === "PermissionRequest") return "needs_input";
+  // #763 — a typed provider-interruption verdict (e.g. the Codex usage-limit
+  // banner detector): the seat is blocked on quota, not idle and not awaiting
+  // operator input. needs_input carries it through seat status so `rig ps`
+  // reports the block; the reason names it exactly.
+  if (rawEvent === "at_limit") return "needs_input";
   if (rawEvent === "Notification") {
     if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")) return "needs_input";
     return rawSubtype === "idle_prompt" ? "idle" : "unknown";
@@ -386,6 +391,8 @@ function normalizeHookActivity(input: {
   let normalizedReason = reason;
   if (rawEvent === "PermissionRequest") {
     normalizedReason = "permission_request";
+  } else if (rawEvent === "at_limit") {
+    normalizedReason = "usage_limit";
   } else if (rawEvent === "Notification") {
     if (state === "unknown") normalizedReason = rawSubtype ? reason : "notification";
   } else if (rawEvent === "SessionStart") {

@@ -4,7 +4,14 @@ import {
   recordCodexLimitBanner,
 } from "../src/domain/provider/codex-limit-banner.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
+import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import { EventBus } from "../src/domain/event-bus.js";
+import { RigRepository } from "../src/domain/rig-repository.js";
+import { SessionRegistry } from "../src/domain/session-registry.js";
+import { attachAgentActivity } from "../src/domain/node-inventory.js";
 import type { AgentActivity } from "../src/domain/types.js";
+import type Database from "better-sqlite3";
+import { createFullTestDb } from "./helpers/test-app.js";
 
 const BANNER = [
   " long output above",
@@ -46,6 +53,50 @@ describe("detectCodexLimitBanner", () => {
   it("ignores ordinary panes", () => {
     expect(detectCodexLimitBanner("output\n❯ ")).toBeNull();
   });
+
+  it("ignores a banner with a newer user message and reply below it", () => {
+    const pane = [
+      "■ You've hit your usage limit. try again at 4:14 AM.",
+      "",
+      "❯ please continue with the task",
+      "Done, I continued and finished the remaining work.",
+      "› Ask Codex to do anything",
+    ].join("\n");
+    expect(detectCodexLimitBanner(pane)).toBeNull();
+  });
+
+  it("ignores a banner inside a fenced block the agent printed", () => {
+    const pane = [
+      "here is what the error looked like:",
+      "```",
+      "■ You've hit your usage limit. try again at 4:14 AM.",
+      "```",
+      "› Ask Codex to do anything",
+    ].join("\n");
+    expect(detectCodexLimitBanner(pane)).toBeNull();
+  });
+
+  it("still detects a new banner printed at the bottom after recovery", () => {
+    const pane = [
+      "■ You've hit your usage limit. try again at 4:14 AM.",
+      "",
+      "❯ please continue with the task",
+      "Done, I continued and finished the remaining work.",
+      "■ You've hit your usage limit. try again at 6:02 AM.",
+      "› Ask Codex to do anything",
+    ].join("\n");
+    expect(detectCodexLimitBanner(pane)).toMatchObject({ resetText: "6:02 AM" });
+  });
+
+  it("accepts input area and footer below a current banner", () => {
+    const pane = [
+      "■ You've hit your usage limit. try again at 4:14 AM.",
+      "",
+      "› Ask Codex to do anything",
+      "gpt-5.1-codex-max · Context [12%]",
+    ].join("\n");
+    expect(detectCodexLimitBanner(pane)).toMatchObject({ resetText: "4:14 AM" });
+  });
 });
 
 function fakeStore(latest: AgentActivity | null) {
@@ -57,8 +108,8 @@ function fakeStore(latest: AgentActivity | null) {
 
 function hookRow(overrides: Partial<AgentActivity> = {}): AgentActivity {
   return {
-    state: "unknown",
-    reason: "at_limit",
+    state: "needs_input",
+    reason: "usage_limit",
     evidenceSource: "runtime_hook",
     sampledAt: "2026-10-07T00:00:00.000Z",
     evidence: "try again at 4:14 AM",
@@ -73,6 +124,8 @@ function hookRow(overrides: Partial<AgentActivity> = {}): AgentActivity {
   };
 }
 
+const T0 = new Date("2026-10-07T00:00:00.000Z");
+
 describe("recordCodexLimitBanner", () => {
   it("records a typed at_limit row with the carried generation", () => {
     const store = fakeStore(null);
@@ -81,6 +134,7 @@ describe("recordCodexLimitBanner", () => {
       resolveGeneration: () => "gen-1",
       sessionName: "dev@rig",
       banner: { resetText: "4:14 AM", evidence: "■ ..." },
+      now: () => T0,
     });
     expect(recorded).toBe(true);
     expect(store.recordHookEvent).toHaveBeenCalledWith({
@@ -92,25 +146,27 @@ describe("recordCodexLimitBanner", () => {
     });
   });
 
-  it("skips an already-reported fresh banner (transition-only)", () => {
-    const store = fakeStore(hookRow());
+  it("skips a still-fresh report (no per-second event spam)", () => {
+    const store = fakeStore(hookRow({ eventAt: "2026-10-06T23:59:00.000Z" }));
     const recorded = recordCodexLimitBanner({
       store,
       resolveGeneration: () => "gen-1",
       sessionName: "dev@rig",
       banner: { resetText: "4:14 AM", evidence: "■ ..." },
+      now: () => T0,
     });
     expect(recorded).toBe(false);
     expect(store.recordHookEvent).not.toHaveBeenCalled();
   });
 
-  it("reports again when the row went stale while the banner persists", () => {
-    const store = fakeStore(hookRow({ stale: true }));
+  it("reports again once the report ages out while the banner persists", () => {
+    const store = fakeStore(hookRow({ eventAt: "2026-10-06T23:50:00.000Z", stale: true }));
     const recorded = recordCodexLimitBanner({
       store,
       resolveGeneration: () => "gen-1",
       sessionName: "dev@rig",
       banner: { resetText: "4:14 AM", evidence: "■ ..." },
+      now: () => T0,
     });
     expect(recorded).toBe(true);
     expect(store.recordHookEvent).toHaveBeenCalledTimes(1);
@@ -125,6 +181,7 @@ describe("recordCodexLimitBanner", () => {
       resolveGeneration: () => "gen-1",
       sessionName: "dev@rig",
       banner: { resetText: "5:00 AM", evidence: "■ ..." },
+      now: () => T0,
     });
     expect(recorded).toBe(true);
   });
@@ -161,5 +218,55 @@ describe("SeatStructuralActivityService — Codex limit banner emission", () => 
       capturePaneContent: async () => BANNER,
     } as never);
     await expect(svc.pollSeat("dev@rig", null, "codex")).resolves.not.toBeNull();
+  });
+});
+
+describe("codex-limit-banner — store mapping and seat status", () => {
+  const NOW = new Date("2026-10-07T00:00:00.000Z");
+
+  function seedCodexSeat(db: Database.Database) {
+    const rigRepo = new RigRepository(db);
+    const sessionRegistry = new SessionRegistry(db);
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.qa", { runtime: "codex" });
+    const session = sessionRegistry.registerSession(node.id, "dev-qa@test-rig");
+    sessionRegistry.updateStatus(session.id, "running");
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-qa@test-rig", attachmentType: "tmux" });
+    return { sessionName: "dev-qa@test-rig" as string };
+  }
+
+  function entries(sessionName: string) {
+    return [{
+      canonicalSessionName: sessionName,
+      runtime: "codex",
+      attachmentType: "tmux",
+      logicalId: "dev.qa",
+    }] as never;
+  }
+
+  it("maps a recorded at_limit row to needs_input/usage_limit, not idle", async () => {
+    const db = createFullTestDb();
+    try {
+      const { sessionName } = seedCodexSeat(db);
+      const store = new AgentActivityStore({ db, eventBus: new EventBus(db), now: () => NOW });
+      const recorded = store.recordHookEvent({
+        runtime: "codex",
+        sessionName,
+        hookEvent: "at_limit",
+        subtype: "try again at 4:14 AM",
+        occurredAt: "2026-10-06T23:59:00.000Z",
+      });
+      expect(recorded.ok).toBe(true);
+
+      const out = (await attachAgentActivity(entries(sessionName), {
+        tmuxAdapter: { capturePaneContent: async () => BANNER } as never,
+        activityStore: store,
+        now: NOW,
+      } as never)) as Array<{ agentActivity: AgentActivity }>;
+      expect(out[0]!.agentActivity.state).toBe("needs_input");
+      expect(out[0]!.agentActivity.reason).toBe("usage_limit");
+    } finally {
+      db.close();
+    }
   });
 });

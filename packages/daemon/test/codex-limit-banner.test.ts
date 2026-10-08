@@ -5,6 +5,10 @@ import {
 } from "../src/domain/provider/codex-limit-banner.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
+import {
+  hookMeansNeedsInput,
+  latestHookWaitsOnPerson,
+} from "../src/domain/agent-activity-store.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
@@ -97,6 +101,25 @@ describe("detectCodexLimitBanner", () => {
     ].join("\n");
     expect(detectCodexLimitBanner(pane)).toMatchObject({ resetText: "4:14 AM" });
   });
+
+  it("accepts any footer format below the input line", () => {
+    const pane = [
+      "■ You've hit your usage limit. try again at 4:14 AM.",
+      "› Ask Codex to do anything",
+      "gpt-6-astra xhigh · ~/path",
+    ].join("\n");
+    expect(detectCodexLimitBanner(pane)).toMatchObject({ resetText: "4:14 AM" });
+  });
+
+  it("ignores a one-line banner whose next line is newer output", () => {
+    // The banner line already carries its reset text, so the next line is
+    // newer output, not a wrapped continuation.
+    const pane = [
+      "■ You've hit your usage limit. try again at 4:14 AM.",
+      "❯ please continue with the task",
+    ].join("\n");
+    expect(detectCodexLimitBanner(pane)).toBeNull();
+  });
 });
 
 function fakeStore(latest: AgentActivity | null) {
@@ -108,7 +131,7 @@ function fakeStore(latest: AgentActivity | null) {
 
 function hookRow(overrides: Partial<AgentActivity> = {}): AgentActivity {
   return {
-    state: "needs_input",
+    state: "unknown",
     reason: "usage_limit",
     evidenceSource: "runtime_hook",
     sampledAt: "2026-10-07T00:00:00.000Z",
@@ -132,14 +155,14 @@ describe("recordCodexLimitBanner", () => {
     const recorded = recordCodexLimitBanner({
       store,
       resolveGeneration: () => "gen-1",
-      sessionName: "dev@rig",
+      sessionName: "rec-1@rig",
       banner: { resetText: "4:14 AM", evidence: "■ ..." },
       now: () => T0,
     });
     expect(recorded).toBe(true);
     expect(store.recordHookEvent).toHaveBeenCalledWith({
       runtime: "codex",
-      sessionName: "dev@rig",
+      sessionName: "rec-1@rig",
       hookEvent: "at_limit",
       subtype: "4:14 AM",
       generation: "gen-1",
@@ -151,7 +174,7 @@ describe("recordCodexLimitBanner", () => {
     const recorded = recordCodexLimitBanner({
       store,
       resolveGeneration: () => "gen-1",
-      sessionName: "dev@rig",
+      sessionName: "rec-2@rig",
       banner: { resetText: "4:14 AM", evidence: "■ ..." },
       now: () => T0,
     });
@@ -164,7 +187,7 @@ describe("recordCodexLimitBanner", () => {
     const recorded = recordCodexLimitBanner({
       store,
       resolveGeneration: () => "gen-1",
-      sessionName: "dev@rig",
+      sessionName: "rec-3@rig",
       banner: { resetText: "4:14 AM", evidence: "■ ..." },
       now: () => T0,
     });
@@ -172,18 +195,39 @@ describe("recordCodexLimitBanner", () => {
     expect(store.recordHookEvent).toHaveBeenCalledTimes(1);
   });
 
-  it("reports again once superseding evidence arrives and the banner returns", () => {
-    // A Stop row superseded the banner (clearing on evidence); the banner is
-    // back, so a fresh typed row is due.
+  it("reports again once superseding evidence arrives and a new banner appears", () => {
+    // A Stop row superseded the banner (clearing on evidence); a banner with
+    // new reset text is a new episode, so a fresh typed row is due.
     const store = fakeStore(hookRow({ rawEvent: "Stop", reason: "stop", rawSubtype: null }));
     const recorded = recordCodexLimitBanner({
       store,
       resolveGeneration: () => "gen-1",
-      sessionName: "dev@rig",
+      sessionName: "rec-4@rig",
       banner: { resetText: "5:00 AM", evidence: "■ ..." },
       now: () => T0,
     });
     expect(recorded).toBe(true);
+  });
+
+  it("does not record the same banner again after a newer hook cleared it", () => {
+    const getLatest = vi
+      .fn()
+      .mockReturnValueOnce(null)
+      .mockReturnValue(hookRow({ rawEvent: "Stop", reason: "stop", rawSubtype: null }));
+    const store = { getLatestForNode: getLatest, recordHookEvent: vi.fn().mockReturnValue({ ok: true }) };
+    const banner = { resetText: "4:14 AM", evidence: "■ ..." };
+    const deps = (s: string) => ({
+      store,
+      resolveGeneration: () => "gen-1",
+      sessionName: s,
+      banner,
+      now: () => T0,
+    });
+    expect(recordCodexLimitBanner(deps("rec-5@rig"))).toBe(true);
+    // Same banner still visible after a hook cleared the signal: same
+    // episode, no new row.
+    expect(recordCodexLimitBanner(deps("rec-5@rig"))).toBe(false);
+    expect(store.recordHookEvent).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -263,10 +307,20 @@ describe("codex-limit-banner — store mapping and seat status", () => {
         activityStore: store,
         now: NOW,
       } as never)) as Array<{ agentActivity: AgentActivity }>;
-      expect(out[0]!.agentActivity.state).toBe("needs_input");
+      // Carried through, not idle: unknown state (never needs_input, so the
+      // send guard and retry logic don't read it as waiting on a person)
+      // with the exact reason naming the block.
+      expect(out[0]!.agentActivity.state).toBe("unknown");
       expect(out[0]!.agentActivity.reason).toBe("usage_limit");
     } finally {
       db.close();
     }
+  });
+
+  it("never counts as waiting on a person (sends to the seat go through)", () => {
+    expect(hookMeansNeedsInput("at_limit", "try again at 4:14 AM", "codex")).toBe(false);
+    expect(
+      latestHookWaitsOnPerson(hookRow({ reason: "usage_limit" }), "codex")
+    ).toBe(false);
   });
 });

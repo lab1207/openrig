@@ -25,16 +25,9 @@ const RESET_RE = /try again at ([^.!\n]+)/i;
 // not the seat's own state.
 const FENCE_RE = /^\s*```/;
 
-// Trailing content that may sit below a genuine banner without displacing it:
-// blank lines, the empty composer, and the model/context footer. Anything
-// else (a user message, a reply, agent output) means the banner is no longer
-// the most recent content and must not report.
-const TRAILING_OK_RES = [
-  /^\s*$/,
-  /^[❯›]\s*$/,
-  /^›\s+Ask Codex to do anything\s*$/,
-  /gpt-\S+ · Context \[/,
-];
+// The input line starts the composer's input area: everything from it down is
+// input area whatever the footer format, so the footer never needs matching.
+const INPUT_LINE_RE = /^›\s*(Ask Codex to do anything)?\s*$/;
 
 /**
  * Match the banner's own line form: the ■ marker must lead (after indent).
@@ -52,17 +45,17 @@ export function detectCodexLimitBanner(paneContent: string): CodexLimitBanner | 
     const line = lines[i]!;
     if (!BANNER_LINE_RE.test(line)) continue;
     if (isFenced(lines, i)) continue;
-    // The reset phrase can wrap onto the following lines in a capture; the
-    // banner block runs through the line carrying it. Everything after the
-    // block must be input area or footer — a user message, a reply, or
-    // further output below means a recovered seat whose old banner merely
-    // scrolled into view. Codex prints a new banner at the bottom when the
-    // limit hits again, so that is still detected.
+    // The reset phrase can wrap onto the following lines in a capture — but
+    // only when the banner line doesn't carry it yet. A one-line banner with
+    // its reset text ends here: the next line is newer output, not a
+    // continuation, and is judged on its own below.
     let blockEnd = i;
-    for (let j = i + 1; j <= Math.min(i + 2, lines.length - 1); j++) {
-      if (RESET_RE.test(lines.slice(i, j + 1).join("\n"))) {
-        blockEnd = j;
-        break;
+    if (!RESET_RE.test(line)) {
+      for (let j = i + 1; j <= Math.min(i + 2, lines.length - 1); j++) {
+        if (RESET_RE.test(lines.slice(i, j + 1).join("\n"))) {
+          blockEnd = j;
+          break;
+        }
       }
     }
     const window = lines.slice(i, blockEnd + 1).join("\n");
@@ -85,9 +78,14 @@ function isFenced(lines: string[], index: number): boolean {
 }
 
 function isMostRecent(lines: string[], index: number): boolean {
-  return lines
-    .slice(index + 1)
-    .every((line) => TRAILING_OK_RES.some((pattern) => pattern.test(line)));
+  // The input line starts the input area: everything from it down is input
+  // area whatever the footer format. Before it, only blank lines may follow
+  // the banner block — a user message, a reply, or further output means a
+  // recovered seat whose old banner merely scrolled into view. Codex prints a
+  // new banner at the bottom when the limit hits again, so that is detected.
+  const inputAt = lines.findIndex((line) => INPUT_LINE_RE.test(line));
+  const tail = inputAt < 0 ? lines.slice(index + 1) : lines.slice(index + 1, inputAt);
+  return tail.every((line) => /^\s*$/.test(line));
 }
 
 /**
@@ -102,6 +100,16 @@ function isMostRecent(lines: string[], index: number): boolean {
  * time (same-tick pairing with the pane content); a mismatch at read
  * resolves fail-visible, never false-fresh.
  */
+/**
+ * The reset text of the banner last recorded per session. A newer hook row
+ * clears the signal by superseding it; if the same banner is still visible
+ * afterwards, it is the same limit episode, not a new one — record again
+ * only when a new banner (different reset text) appears. Bounded so idle
+ * daemons cannot grow it without limit.
+ */
+const lastRecordedBySession = new Map<string, string | null>();
+const LAST_RECORDED_CAP = 1000;
+
 export function recordCodexLimitBanner(deps: {
   store: Pick<AgentActivityStore, "getLatestForNode" | "recordHookEvent">;
   resolveGeneration: (sessionName: string) => string | null;
@@ -113,8 +121,12 @@ export function recordCodexLimitBanner(deps: {
   const nowMs = nowFn().getTime();
   const latest = deps.store.getLatestForNode({ sessionName: deps.sessionName });
   if (latest?.rawEvent === "at_limit") {
+    // Still the reported episode: refresh only once the report ages out, so
+    // a night at the limit is a handful of rows, not thousands.
     const eventMs = latest.eventAt ? Date.parse(latest.eventAt) : Number.NaN;
     if (Number.isFinite(eventMs) && nowMs - eventMs < AGENT_ACTIVITY_FRESHNESS_MS) return false;
+  } else if (latest) {
+    if (lastRecordedBySession.get(deps.sessionName) === deps.banner.resetText) return false;
   }
   deps.store.recordHookEvent({
     runtime: "codex",
@@ -123,5 +135,10 @@ export function recordCodexLimitBanner(deps: {
     subtype: deps.banner.resetText,
     generation: deps.resolveGeneration(deps.sessionName),
   });
+  lastRecordedBySession.set(deps.sessionName, deps.banner.resetText);
+  if (lastRecordedBySession.size > LAST_RECORDED_CAP) {
+    const oldest = lastRecordedBySession.keys().next();
+    if (!oldest.done) lastRecordedBySession.delete(oldest.value);
+  }
   return true;
 }

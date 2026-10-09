@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import {
   detectCodexLimitBanner,
+  clearRecordedBanner,
   recordCodexLimitBanner,
 } from "../src/domain/provider/codex-limit-banner.js";
 import { SeatStructuralActivityService } from "../src/domain/seat-structural-activity-service.js";
@@ -288,7 +289,7 @@ describe("codex-limit-banner — store mapping and seat status", () => {
     }] as never;
   }
 
-  it("maps a recorded at_limit row to needs_input/usage_limit, not idle", async () => {
+  it("maps a recorded at_limit row to unknown/usage_limit, not idle — even with a cached idle pane", async () => {
     const db = createFullTestDb();
     try {
       const { sessionName } = seedCodexSeat(db);
@@ -305,6 +306,15 @@ describe("codex-limit-banner — store mapping and seat status", () => {
       const out = (await attachAgentActivity(entries(sessionName), {
         tmuxAdapter: { capturePaneContent: async () => BANNER } as never,
         activityStore: store,
+        // A cached idle pane reading must NOT cover the typed limit row.
+        structuralActivity: {
+          getStructuralActivity: () => ({
+            state: "agent_idle",
+            reason: "idle_prompt",
+            evidence: "› ",
+            observedAt: "2026-10-07T00:00:00.000Z",
+          }),
+        } as never,
         now: NOW,
       } as never)) as Array<{ agentActivity: AgentActivity }>;
       // Carried through, not idle: unknown state (never needs_input, so the
@@ -322,5 +332,34 @@ describe("codex-limit-banner — store mapping and seat status", () => {
     expect(
       latestHookWaitsOnPerson(hookRow({ reason: "usage_limit" }), "codex")
     ).toBe(false);
+  });
+
+  it("forgets the recorded banner when a poll finds no current banner", () => {
+    const getLatest = vi
+      .fn()
+      .mockReturnValueOnce(null)
+      .mockReturnValue(hookRow({ rawEvent: "Stop", reason: "stop", rawSubtype: null }));
+    const store = { getLatestForNode: getLatest, recordHookEvent: vi.fn().mockReturnValue({ ok: true }) };
+    const bannerNoReset = { resetText: null, evidence: "■ ..." };
+    const bannerSameReset = { resetText: "4:14 AM", evidence: "■ ..." };
+    const deps = (s: string, banner: { resetText: string | null; evidence: string }) => ({
+      store,
+      resolveGeneration: () => "gen-1",
+      sessionName: s,
+      banner,
+      now: () => T0,
+    });
+    // No reset time: record, hook clears it, same banner returns → same
+    // episode is over, so it reports again.
+    expect(recordCodexLimitBanner(deps("rec-7@rig", bannerNoReset))).toBe(true);
+    expect(recordCodexLimitBanner(deps("rec-7@rig", bannerNoReset))).toBe(false);
+    clearRecordedBanner("rec-7@rig");
+    expect(recordCodexLimitBanner(deps("rec-7@rig", bannerNoReset))).toBe(true);
+    // Identical reset text: same sequence reports again after the clear.
+    expect(recordCodexLimitBanner(deps("rec-8@rig", bannerSameReset))).toBe(true);
+    expect(recordCodexLimitBanner(deps("rec-8@rig", bannerSameReset))).toBe(false);
+    clearRecordedBanner("rec-8@rig");
+    expect(recordCodexLimitBanner(deps("rec-8@rig", bannerSameReset))).toBe(true);
+    expect(store.recordHookEvent).toHaveBeenCalledTimes(4);
   });
 });

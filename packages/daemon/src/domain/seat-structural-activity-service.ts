@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { PaneCapture, TmuxAdapter } from "../adapters/tmux.js";
 import { classifyPaneActivity, type PaneActivityClassification } from "./session-transport.js";
-import { detectCodexLimitBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
+import { detectCodexLimitBanner, clearRecordedBanner, type CodexLimitBanner } from "./provider/codex-limit-banner.js";
 
 /** A cached STRUCTURAL pane observation: the classifyPaneActivity verdict plus WHEN the pane was read
  *  as motion. observedAt is a LIVENESS timestamp (last time we saw the pane), NOT a hook-arrival age —
@@ -113,10 +113,13 @@ export class SeatStructuralActivityService {
     this.latestBySession.set(sessionName, obs);
     // #763: a Codex usage-limit banner is invisible to the hook vocabulary,
     // so the reactive tap never fires for it. Report what the seat shows, on
-    // transition only (the recorder skips an already-reported banner).
+    // transition only (the recorder skips an already-reported banner). A poll
+    // with no current banner ends the episode: the memory is cleared so a
+    // banner that appears later counts as new even with identical text.
     if (runtime === "codex" && this.bannerEmitter) {
       const banner = detectCodexLimitBanner(content);
       if (banner) this.bannerEmitter(sessionName, banner, at);
+      else clearRecordedBanner(sessionName);
     }
     return obs;
   }

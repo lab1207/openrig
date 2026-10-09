@@ -79,26 +79,18 @@ function isFenced(lines: string[], index: number): boolean {
 
 function isMostRecent(lines: string[], index: number): boolean {
   // The input line starts the input area: everything from it down is input
-  // area whatever the footer format. Before it, only blank lines may follow
-  // the banner block — a user message, a reply, or further output means a
-  // recovered seat whose old banner merely scrolled into view. Codex prints a
-  // new banner at the bottom when the limit hits again, so that is detected.
-  const inputAt = lines.findIndex((line) => INPUT_LINE_RE.test(line));
-  const tail = inputAt < 0 ? lines.slice(index + 1) : lines.slice(index + 1, inputAt);
+  // area whatever the footer format. Search for it only after the banner
+  // block — an input-like line above the banner must not mask newer output
+  // below it. Before it, only blank lines may follow the block.
+  const after = lines.slice(index + 1);
+  const inputAt = after.findIndex((line) => INPUT_LINE_RE.test(line));
+  const tail = inputAt < 0 ? after : after.slice(0, inputAt);
   return tail.every((line) => /^\s*$/.test(line));
 }
 
 /**
- * Record a banner observation as a typed `at_limit` hook row.
- *
- * Transition-only with a bounded refresh: an already-reported banner stays
- * until superseding evidence (the seat's next turn or hook event) replaces
- * it — never a timer. A still-fresh report is not rewritten every sweep
- * (no per-second event spam overnight); once the report ages past the
- * activity freshness window, a still-visible banner reports again. The
- * occupant generation is carried from the live registry read at observation
- * time (same-tick pairing with the pane content); a mismatch at read
- * resolves fail-visible, never false-fresh.
+ * Record a banner observation as a typed `at_limit` hook row. See
+ * `clearRecordedBanner` for how the same-banner memory is reset.
  */
 /**
  * The reset text of the banner last recorded per session. A newer hook row
@@ -109,6 +101,15 @@ function isMostRecent(lines: string[], index: number): boolean {
  */
 const lastRecordedBySession = new Map<string, string | null>();
 const LAST_RECORDED_CAP = 1000;
+
+/**
+ * Forget a session's recorded banner. The poller calls this when a Codex
+ * seat shows no current banner: the episode is over, so a banner that
+ * appears later is new even if its reset text matches the old one.
+ */
+export function clearRecordedBanner(sessionName: string): void {
+  lastRecordedBySession.delete(sessionName);
+}
 
 export function recordCodexLimitBanner(deps: {
   store: Pick<AgentActivityStore, "getLatestForNode" | "recordHookEvent">;

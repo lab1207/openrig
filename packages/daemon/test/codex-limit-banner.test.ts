@@ -327,6 +327,47 @@ describe("codex-limit-banner — store mapping and seat status", () => {
     }
   });
 
+  it.each([
+    ["aged-out hook", { reason: "stale_runtime_hook", stale: true }],
+    ["generation-mismatched hook", { reason: "generation_mismatch", stale: true }],
+  ])("a demoted limit (%s) falls back to the structural reading", async (_label, verdict) => {
+    const db = createFullTestDb();
+    try {
+      const { sessionName } = seedCodexSeat(db);
+      const store = new AgentActivityStore({ db, eventBus: new EventBus(db), now: () => NOW });
+      const recorded = store.recordHookEvent({
+        runtime: "codex",
+        sessionName,
+        hookEvent: "at_limit",
+        subtype: "try again at 4:14 AM",
+        occurredAt: "2026-10-06T23:50:00.000Z",
+      });
+      expect(recorded.ok).toBe(true);
+
+      const out = (await attachAgentActivity(entries(sessionName), {
+        tmuxAdapter: { capturePaneContent: async () => BANNER } as never,
+        activityStore: {
+          getLatestForNode: () => ({
+            ...store.getLatestForNode({ sessionName })!,
+            ...verdict,
+          }),
+        } as never,
+        structuralActivity: {
+          getStructuralActivity: () => ({
+            state: "agent_idle",
+            reason: "idle_prompt",
+            evidence: "› ",
+            observedAt: "2026-10-07T00:00:00.000Z",
+          }),
+        } as never,
+        now: NOW,
+      } as never)) as Array<{ agentActivity: AgentActivity }>;
+      expect(out[0]!.agentActivity.reason).toBe("idle_prompt");
+    } finally {
+      db.close();
+    }
+  });
+
   it("never counts as waiting on a person (sends to the seat go through)", () => {
     expect(hookMeansNeedsInput("at_limit", "try again at 4:14 AM", "codex")).toBe(false);
     expect(
@@ -334,8 +375,7 @@ describe("codex-limit-banner — store mapping and seat status", () => {
     ).toBe(false);
   });
 
-  it("forgets the recorded banner when a poll finds no current banner", () => {
-    const getLatest = vi
+  it("forgets the recorded banner when a poll finds no current banner", () => {    const getLatest = vi
       .fn()
       .mockReturnValueOnce(null)
       .mockReturnValue(hookRow({ rawEvent: "Stop", reason: "stop", rawSubtype: null }));
